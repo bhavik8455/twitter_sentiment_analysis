@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from twitter_client import TwitterClient
 from twitter_client import RateLimitError
 from sentiment import analyze_sentiments
+from domain import analyze_domains, DEFAULT_DOMAIN_LABELS
 from utils import generate_wordcloud_image, clean_text
 
 # Load .env if present
@@ -20,18 +21,34 @@ load_dotenv()
 st.set_page_config(page_title="X (Twitter) Sentiment Analysis", layout="wide")
 
 # Sidebar - Configuration
+
 with st.sidebar:
 	st.header("Settings")
 	st.write("Provide an X username to analyze their recent posts.")
 
 	username = st.text_input("X Username (without @)", value="")
-	max_results = st.slider("Max tweets to fetch", min_value=5, max_value=15, step=1, value=10)
+	max_results = st.slider("Max tweets to fetch", min_value=5, max_value=70, step=1, value=10)
 	exclude_replies = st.checkbox("Exclude replies", value=True)
 	exclude_retweets = st.checkbox("Exclude retweets", value=True)
 	start_date = st.date_input("Start date (optional)", value=None)
 	end_date = st.date_input("End date (optional)", value=None)
 
 	keyword_filter = st.text_input("Keyword contains (optional)", value="")
+
+	st.divider()
+	st.caption("Domain Classification")
+	domain_method = st.selectbox("Method", options=["Keyword", "Zero-shot"], index=0)
+	customize_domains = st.checkbox("Customize domains (advanced)", value=False)
+	if customize_domains:
+		custom_domains_raw = st.text_area(
+			"Candidate domains (comma-separated)",
+			value=", ".join(DEFAULT_DOMAIN_LABELS),
+			height=70,
+			help="Loaded from domain_classification.json if present; otherwise defaults.",
+		)
+	else:
+		# Use JSON/default domains silently
+		custom_domains_raw = ", ".join(DEFAULT_DOMAIN_LABELS)
 	analyze_button = st.button("Analyze")
 
 # Main Title
@@ -112,16 +129,11 @@ def render_charts(df: pd.DataFrame):
 	})
 	st.plotly_chart(fig_bar, use_container_width=True)
 
-	st.subheader("Sentiment Over Time")
-	df_time = df.copy()
-	df_time["date"] = pd.to_datetime(df_time["created_at"]).dt.date
-	series = df_time.groupby(["date", "sentiment_label"]).size().reset_index(name="count")
-	fig_area = px.area(series, x="date", y="count", color="sentiment_label", color_discrete_map={
-		"Positive": "#2ecc71",
-		"Neutral": "#95a5a6",
-		"Negative": "#e74c3c",
-	})
-	st.plotly_chart(fig_area, use_container_width=True)
+	st.subheader("Domain Distribution")
+	domain_counts = df["domain_label"].value_counts().reset_index()
+	domain_counts.columns = ["domain", "count"]
+	fig_domains = px.bar(domain_counts, x="domain", y="count", color="domain")
+	st.plotly_chart(fig_domains, use_container_width=True)
 
 	st.subheader("Word Cloud")
 	image = generate_wordcloud_image(" ".join(df.loc[df["sentiment_label"] != "Neutral", "text_clean"].tolist()) or " ")
@@ -130,12 +142,23 @@ def render_charts(df: pd.DataFrame):
 
 def render_table(df: pd.DataFrame):
 	st.subheader("Tweets")
-	st.dataframe(df[["created_at", "sentiment_label", "compound", "text"]].sort_values("created_at", ascending=False), use_container_width=True, height=400)
+	st.dataframe(
+		df[["created_at", "domain_label", "domain_confidence", "sentiment_label", "compound", "text"]]
+			.sort_values("created_at", ascending=False),
+		use_container_width=True,
+		height=400,
+	)
 
 	# Export full records (all columns) as JSON
 	records = df.sort_values("created_at", ascending=False).to_dict(orient="records")
 	json_str = json.dumps(records, ensure_ascii=False, indent=2, default=str)
 	st.download_button("Download JSON", data=json_str.encode("utf-8"), file_name="tweets_sentiment.json", mime="application/json")
+
+
+def render_domain_classification(df: pd.DataFrame):
+	st.subheader("Domain Classification (Per Post)")
+	view = df[["created_at", "domain_label", "text"]].sort_values("created_at", ascending=False)
+	st.dataframe(view, use_container_width=True, height=400)
 
 
 if analyze_button:
@@ -178,9 +201,15 @@ if analyze_button:
 	# Sentiment analysis
 	df = analyze_sentiments(df)
 
+	# Domain analysis
+	candidate_domains = [x.strip() for x in (custom_domains_raw or "").split(",") if x.strip()]
+	method = (domain_method or "Keyword").strip().lower()
+	df = analyze_domains(df, candidate_labels=candidate_domains or None, method=method)
+
 	render_overview(df)
 	render_charts(df)
 	render_table(df)
+	render_domain_classification(df)
 
 else:
 	st.info("Enter a username and click Analyze to begin.")
